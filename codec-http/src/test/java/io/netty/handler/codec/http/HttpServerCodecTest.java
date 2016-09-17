@@ -19,6 +19,7 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.util.CharsetUtil;
+
 import org.junit.Test;
 
 import static org.hamcrest.CoreMatchers.*;
@@ -63,6 +64,72 @@ public class HttpServerCodecTest {
         }
         assertFalse(empty);
         assertEquals(offeredContentLength, totalBytesPolled);
+    }
+
+    void transfer(EmbeddedChannel in, EmbeddedChannel out, String msgHeader) {
+        System.out.println(msgHeader);
+        for (Object msg: in.outboundMessages()) {
+            assertTrue(msg instanceof ByteBuf);
+            ByteBuf buf = (ByteBuf)msg;
+            String str = buf.toString(java.nio.charset.StandardCharsets.UTF_8);
+            str = str.replace("\n", "\\n\n").replace("\r", "\\r");
+            System.out.print(str);
+            out.writeInbound(msg);
+            out.checkException();
+        }
+        System.out.println("------------");
+    }
+
+    // Using DefaultFullHttpResponse will trigger the terminating '0\r\n\r\n\r\n' to be written, which is a protocol error
+    @Test
+    public void testChunkedEncodedHeadResponse() throws Exception {
+        EmbeddedChannel serverEmbedder = new EmbeddedChannel(new HttpServerCodec());
+        EmbeddedChannel clientEmbedder = new EmbeddedChannel(new HttpClientCodec());
+
+        // Need to writing a HEAD request will prime the client codec
+        HttpMessage firstRequest = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.HEAD, "/foo");
+        // if the following was used instead of a full response it results in IllegalStateException: unexpected message type: DefaultFullHttpResponse
+        // unless its followed by a LastHttpContent, which is what causes the encoding of '0\r\n\r\n\r\n'
+        // HttpMessage firstRequest = new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.HEAD, "/foo");
+        clientEmbedder.writeOutbound(firstRequest);
+
+        // Next write a GET request
+        HttpMessage secondRequest = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/foo");
+        clientEmbedder.writeOutbound(secondRequest);
+
+        transfer(clientEmbedder, serverEmbedder, "client->server");
+
+        // Sever will try to send a chunked response to the HEAD request
+        // The problem is that this will always send '0\r\n\r\n\r\n', which is illegal for a HEAD request
+        HttpMessage firstMessage = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK);
+        HttpUtil.setTransferEncodingChunked(firstMessage, true);
+
+        // Need to send a second response or the client codec won't have enough bytes to attempt decoding
+        HttpMessage secondMessage = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK);
+        HttpUtil.setTransferEncodingChunked(secondMessage, true);
+
+        assertTrue(serverEmbedder.writeOutbound(firstMessage, secondMessage));
+        transfer(serverEmbedder, clientEmbedder, "server->client");
+
+        for (Object msg: clientEmbedder.inboundMessages()) {
+            if (msg instanceof HttpResponse) {
+                HttpResponse resp = (HttpResponse) msg;
+                System.out.println(resp);
+                // The second message will fail with 'java.lang.IllegalArgumentException: invalid version format: 0'
+                // Because the decoder assumed no body for the response to the HEAD request, but the
+                // server codec sent '0\r\n\r\n\r\n', wich was interpreted as the status line of the next response.
+                // There is no way to avoid encoding the chunked termination string '0\r\n\r\n\r\n' in netty4
+                if (!resp.decoderResult().isSuccess()) {
+                    fail("Failed to decode: " + resp);
+                }
+            }
+            else if (msg instanceof HttpContent) {
+                assertEquals(((HttpContent) msg).content().capacity(), 0);
+            }
+            else {
+                fail("Unexpected message type: " + msg);
+            }
+        }
     }
 
     @Test

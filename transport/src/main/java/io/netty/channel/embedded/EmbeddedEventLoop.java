@@ -51,6 +51,11 @@ final class EmbeddedEventLoop extends AbstractScheduledEventExecutor implements 
         tasks.add(command);
     }
 
+    @Override
+    public void executeAfterEventLoopIteration(Runnable task) {
+        execute(task);
+    }
+
     void runTasks() {
         for (;;) {
             Runnable task = tasks.poll();

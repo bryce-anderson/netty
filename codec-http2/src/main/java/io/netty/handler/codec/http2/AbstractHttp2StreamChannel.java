@@ -522,6 +522,7 @@ abstract class AbstractHttp2StreamChannel extends DefaultAttributeMap implements
      * channel.
      */
     void fireChildRead(Http2Frame frame) {
+        assert readStatus != ReadStatus.REQUESTED;
         assert eventLoop().inEventLoop();
         if (!isActive()) {
             ReferenceCountUtil.release(frame);
@@ -770,32 +771,47 @@ abstract class AbstractHttp2StreamChannel extends DefaultAttributeMap implements
             }
         }
 
-        void doBeginRead() {
-            Object message;
-            if (inboundBuffer == null || (message = inboundBuffer.poll()) == null) {
-                if (readEOS) {
-                    unsafe.closeForcibly();
-                }
-            } else {
-                final RecvByteBufAllocator.Handle allocHandle = recvBufAllocHandle();
-                allocHandle.reset(config());
-                boolean continueReading = false;
-                do {
-                    flowControlledBytes += doRead0((Http2Frame) message, allocHandle);
-                } while ((readEOS || (continueReading = allocHandle.continueReading())) &&
-                        (message = inboundBuffer.poll()) != null);
+        private boolean bufferEmpty() {
+            return inboundBuffer == null || inboundBuffer.isEmpty();
+        }
 
-                if (continueReading && isParentReadInProgress() && !readEOS) {
-                    // Currently the parent and child channel are on the same EventLoop thread. If the parent is
-                    // currently reading it is possile that more frames will be delivered to this child channel. In
-                    // the case that this child channel still wants to read we delay the channelReadComplete on this
-                    // child channel until the parent is done reading.
-                    if (!readCompletePending) {
-                        readCompletePending = true;
-                        addChannelToReadCompletePendingQueue();
+        void doBeginRead() {
+            while (readStatus != ReadStatus.IDLE || readEOS) {
+                if (bufferEmpty()) {
+                    if (readEOS) {
+                        unsafe.closeForcibly();
                     }
+                    return;
                 } else {
-                    notifyReadComplete(allocHandle, true);
+                    final RecvByteBufAllocator.Handle allocHandle = recvBufAllocHandle();
+                    allocHandle.reset(config());
+                    boolean continueReading;
+                    do {
+                        flowControlledBytes += doRead0((Http2Frame) inboundBuffer.poll(), allocHandle);
+
+                        // If a read call triggered us to go to the REQUESTED state
+                        // we will continue to read if we have data.
+                        if (readStatus == ReadStatus.REQUESTED && !bufferEmpty()) {
+                            readStatus = ReadStatus.IN_PROGRESS;
+                            continueReading = true;
+                        } else {
+                            continueReading = allocHandle.continueReading();
+                        }
+                    } while ((readEOS || continueReading) && !bufferEmpty());
+
+                    if (continueReading && isParentReadInProgress() && !readEOS) {
+                        // Currently the parent and child channel are on the same EventLoop thread. If the parent is
+                        // currently reading it is possible that more frames will be delivered to this child channel. In
+                        // the case that this child channel still wants to read we delay the channelReadComplete on this
+                        // child channel until the parent is done reading.
+                        if (!readCompletePending) {
+                            readCompletePending = true;
+                            addChannelToReadCompletePendingQueue();
+                        }
+                    } else {
+                        // This can trigger more read calls. We need to regard against it.
+                        notifyReadComplete(allocHandle, true);
+                    }
                 }
             }
         }
@@ -833,6 +849,12 @@ abstract class AbstractHttp2StreamChannel extends DefaultAttributeMap implements
             // Reading data may result in frames being written (e.g. WINDOW_UPDATE, RST, etc..). If the parent
             // channel is not currently reading we need to force a flush at the child channel, because we cannot
             // rely upon flush occurring in channelReadComplete on the parent channel.
+
+            // We need level down from read requested to in progress in case we got multiple read calls.
+            if (readStatus == ReadStatus.REQUESTED) {
+                readStatus = ReadStatus.IN_PROGRESS;
+            }
+
             flush();
             if (readEOS) {
                 unsafe.closeForcibly();

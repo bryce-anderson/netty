@@ -352,6 +352,62 @@ public abstract class Http2MultiplexTest<C extends Http2FrameCodec> {
         verifyFramesMultiplexedToCorrectChannel(childChannel, inboundHandler, 6);
     }
 
+    @Test
+    public void useReadWithoutAutoReadInRead() {
+        useReadWithoutAutoReadBuffered(false);
+    }
+
+    @Test
+    public void useReadWithoutAutoReadInReadComplete() {
+        useReadWithoutAutoReadBuffered(true);
+    }
+
+    private void useReadWithoutAutoReadBuffered(final boolean triggerOnReadComplete) {
+        LastInboundHandler inboundHandler = new LastInboundHandler();
+        Http2StreamChannel childChannel = newInboundStream(3, false, inboundHandler);
+        assertTrue(childChannel.config().isAutoRead());
+        childChannel.config().setAutoRead(false);
+        assertFalse(childChannel.config().isAutoRead());
+
+        Http2HeadersFrame headersFrame = inboundHandler.readInbound();
+        assertNotNull(headersFrame);
+
+        // Write some bytes to get the channel into the idle state with buffered data
+        frameInboundWriter.writeInboundData(childChannel.stream().id(), bb("hello world"), 0, false);
+        frameInboundWriter.writeInboundData(childChannel.stream().id(), bb("foo"), 0, false);
+        frameInboundWriter.writeInboundData(childChannel.stream().id(), bb("bar"), 0, false);
+
+        // Add a handler which will request reads.
+        childChannel.pipeline().addFirst(new ChannelInboundHandlerAdapter() {
+
+            @Override
+            public void channelReadComplete(ChannelHandlerContext ctx) throws Exception {
+                super.channelReadComplete(ctx);
+                if (triggerOnReadComplete) {
+                    ctx.read();
+                    ctx.read();
+                }
+            }
+
+            @Override
+            public void channelRead(ChannelHandlerContext ctx, Object msg) {
+                ctx.fireChannelRead(msg);
+                if (!triggerOnReadComplete) {
+                    ctx.read();
+                    ctx.read();
+                }
+            }
+        });
+
+        inboundHandler.channel().read();
+
+        frameInboundWriter.writeInboundData(childChannel.stream().id(), bb("hello world2"), 0, false);
+        frameInboundWriter.writeInboundData(childChannel.stream().id(), bb("foo2"), 0, false);
+        frameInboundWriter.writeInboundData(childChannel.stream().id(), bb("bar2"), 0, true);
+
+        verifyFramesMultiplexedToCorrectChannel(childChannel, inboundHandler, 6);
+    }
+
     private Http2StreamChannel newOutboundStream(ChannelHandler handler) {
         return new Http2StreamChannelBootstrap(parentChannel).handler(handler)
                 .open().syncUninterruptibly().getNow();

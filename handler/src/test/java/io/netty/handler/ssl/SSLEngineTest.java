@@ -1981,6 +1981,47 @@ public abstract class SSLEngineTest {
         }
     }
 
+    @Test(expected = SSLHandshakeException.class)
+//    @Test // This test will succeed unexpectedly
+    public void testIncompatibleCiphers() throws Exception {
+        SelfSignedCertificate ssc = new SelfSignedCertificate();
+        // Select a mandatory cipher from the TLSv1.2 RFC https://www.ietf.org/rfc/rfc5246.txt so handshakes won't fail
+        // due to no shared/supported cipher.
+        clientSslCtx = wrapContext(SslContextBuilder.forClient()
+            .trustManager(InsecureTrustManagerFactory.INSTANCE)
+//            .ciphers(Collections.singletonList(sharedCipher))
+            .protocols(PROTOCOL_TLS_V1_3, PROTOCOL_TLS_V1_2, PROTOCOL_TLS_V1)
+            .sslContextProvider(clientSslContextProvider())
+            .sslProvider(sslClientProvider())
+            .build());
+
+        serverSslCtx = wrapContext(SslContextBuilder.forServer(ssc.certificate(), ssc.privateKey())
+//            .ciphers(Collections.singletonList(sharedCipher))
+            .protocols(PROTOCOL_TLS_V1_3, PROTOCOL_TLS_V1_2, PROTOCOL_TLS_V1)
+            .sslContextProvider(serverSslContextProvider())
+            .sslProvider(sslServerProvider())
+            .build());
+        SSLEngine clientEngine = null;
+        SSLEngine serverEngine = null;
+        try {
+            clientEngine = wrapEngine(clientSslCtx.newEngine(UnpooledByteBufAllocator.DEFAULT));
+            serverEngine = wrapEngine(serverSslCtx.newEngine(UnpooledByteBufAllocator.DEFAULT));
+
+            // Set the server to only support a single TLSv1.2 cipher
+            final String serverCipher = "TLS_RSA_WITH_AES_128_CBC_SHA";
+            serverEngine.setEnabledCipherSuites(new String[] { serverCipher });
+
+            // Set the client to only support a single TLSv1.3 cipher
+            final String clientCipher = "TLS_AES_256_GCM_SHA384";
+            clientEngine.setEnabledCipherSuites(new String[] { clientCipher });
+            handshake(clientEngine, serverEngine);
+        } finally {
+            cleanupClientSslEngine(clientEngine);
+            cleanupServerSslEngine(serverEngine);
+            ssc.delete();
+        }
+    }
+
     @Test
     public void testHandshakeCompletesWithoutFilteringSupportedCipher() throws Exception {
         SelfSignedCertificate ssc = new SelfSignedCertificate();

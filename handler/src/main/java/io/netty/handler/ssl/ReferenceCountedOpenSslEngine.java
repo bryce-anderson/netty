@@ -32,6 +32,7 @@ import io.netty.util.internal.EmptyArrays;
 import io.netty.util.internal.PlatformDependent;
 import io.netty.util.internal.StringUtil;
 import io.netty.util.internal.SuppressJava6Requirement;
+import io.netty.util.internal.SystemPropertyUtil;
 import io.netty.util.internal.ThrowableUtil;
 import io.netty.util.internal.UnstableApi;
 import io.netty.util.internal.logging.InternalLogger;
@@ -94,6 +95,10 @@ import static javax.net.ssl.SSLEngineResult.Status.OK;
 public class ReferenceCountedOpenSslEngine extends SSLEngine implements ReferenceCounted, ApplicationProtocolAccessor {
 
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(ReferenceCountedOpenSslEngine.class);
+
+    // TODO: the default should be true but this is false now for hacking
+    private static final boolean strictSniNames = SystemPropertyUtil.getBoolean(
+        "io.netty.handler.ssl.strictSniNames", false);
 
     private static final ResourceLeakDetector<ReferenceCountedOpenSslEngine> leakDetector =
             ResourceLeakDetectorFactory.instance().newResourceLeakDetector(ReferenceCountedOpenSslEngine.class);
@@ -241,7 +246,7 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
                 @Override
                 public List getRequestedServerNames() {
                     if (clientMode) {
-                        return Java8SslUtils.getSniHostNames(sniHostNames);
+                        return Java8SslUtils.getSniHostNames(sniHostNames, strictSniNames);
                     } else {
                         synchronized (ReferenceCountedOpenSslEngine.this) {
                             if (requestedServerNames == null) {
@@ -345,7 +350,7 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
                     // If on java8 and later we should do some extra validation to ensure we can construct the
                     // SNIHostName later again.
                     if (PlatformDependent.javaVersion() >= 8) {
-                        if (Java8SslUtils.isValidHostNameForSNI(peerHost)) {
+                        if (!strictSniNames || Java8SslUtils.isValidHostNameForSNI(peerHost)) {
                             SSL.setTlsExtHostName(ssl, peerHost);
                             sniHostNames = Collections.singletonList(peerHost);
                         }
@@ -2163,7 +2168,7 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
             Java7SslParametersUtils.setAlgorithmConstraints(sslParameters, algorithmConstraints);
             if (version >= 8) {
                 if (sniHostNames != null) {
-                    Java8SslUtils.setSniHostNames(sslParameters, sniHostNames);
+                    Java8SslUtils.setSniHostNames(sslParameters, sniHostNames, strictSniNames);
                 }
                 if (!isDestroyed()) {
                     Java8SslUtils.setUseCipherSuitesOrder(

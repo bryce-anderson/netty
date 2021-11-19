@@ -3039,7 +3039,8 @@ public abstract class SSLEngineTest {
         SSLParameters sslParameters = client.getSSLParameters();
         sslParameters.setEndpointIdentificationAlgorithm("HTTPS");
         if (useSNI) {
-            sslParameters.setServerNames(Collections.<SNIServerName>singletonList(new SNIHostName(fqdn)));
+            sslParameters.setServerNames(Collections.<SNIServerName>singletonList(
+                new SNIHostName((fqdn + ":456").getBytes())));
         }
         client.setSSLParameters(sslParameters);
 
@@ -3060,6 +3061,78 @@ public abstract class SSLEngineTest {
                 throw exception;
             }
             // expected as the hostname not matches.
+        } finally {
+            cleanupClientSslEngine(client);
+            cleanupServerSslEngine(server);
+            cert.delete();
+        }
+    }
+
+    @MethodSource("newTestParams")
+    @ParameterizedTest
+    public void testSniWithPort(SSLEngineTestParam param) throws Exception {
+        if (clientSslContextProvider() != null) {
+            // Not supported when using conscrypt
+            return;
+        }
+        String fqdn = "something.netty.io";
+        SelfSignedCertificate cert = new SelfSignedCertificate(fqdn);
+        clientSslCtx = wrapContext(param, SslContextBuilder
+            .forClient()
+            .trustManager(new TrustManagerFactory(new TrustManagerFactorySpi() {
+                @Override
+                protected void engineInit(KeyStore keyStore) {
+                    // NOOP
+                }
+                @Override
+                protected TrustManager[] engineGetTrustManagers() {
+                    // Provide a custom trust manager, this manager trust all certificates
+                    return new TrustManager[] {
+                        new X509TrustManager() {
+                            @Override
+                            public void checkClientTrusted(
+                                java.security.cert.X509Certificate[] x509Certificates, String s) {
+                                // NOOP
+                            }
+
+                            @Override
+                            public void checkServerTrusted(
+                                java.security.cert.X509Certificate[] x509Certificates, String s) {
+                                // NOOP
+                            }
+
+                            @Override
+                            public java.security.cert.X509Certificate[] getAcceptedIssuers() {
+                                return EmptyArrays.EMPTY_X509_CERTIFICATES;
+                            }
+                        }
+                    };
+                }
+
+                @Override
+                protected void engineInit(ManagerFactoryParameters managerFactoryParameters) {
+                }
+            }, null, TrustManagerFactory.getDefaultAlgorithm()) {
+            })
+            .sslContextProvider(clientSslContextProvider())
+            .sslProvider(sslClientProvider())
+            .build());
+
+        SSLEngine client = wrapEngine(clientSslCtx.newEngine(UnpooledByteBufAllocator.DEFAULT, "127.0.0.1", 1234));
+        SSLParameters sslParameters = client.getSSLParameters();
+        sslParameters.setServerNames(Collections.<SNIServerName>singletonList(
+            new SNIHostName((fqdn + ":456").getBytes())));
+        client.setSSLParameters(sslParameters);
+
+        serverSslCtx = wrapContext(param, SslContextBuilder
+            .forServer(cert.certificate(), cert.privateKey())
+            .sslContextProvider(serverSslContextProvider())
+            .sslProvider(sslServerProvider())
+            .build());
+
+        SSLEngine server = wrapEngine(serverSslCtx.newEngine(UnpooledByteBufAllocator.DEFAULT));
+        try {
+            handshake(param.type(), param.delegate(), client, server);
         } finally {
             cleanupClientSslEngine(client);
             cleanupServerSslEngine(server);

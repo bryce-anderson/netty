@@ -15,14 +15,28 @@
  */
 package io.netty.handler.ssl;
 
+import java.security.KeyStore;
+import java.util.Collections;
+
 import io.netty.buffer.UnpooledByteBufAllocator;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
+import io.netty.handler.ssl.util.SelfSignedCertificate;
 import io.netty.util.ReferenceCountUtil;
+import io.netty.util.internal.EmptyArrays;
+
 import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
+import javax.net.ssl.ManagerFactoryParameters;
+import javax.net.ssl.SNIHostName;
+import javax.net.ssl.SNIServerName;
 import javax.net.ssl.SSLEngine;
+import javax.net.ssl.SSLParameters;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.TrustManagerFactory;
+import javax.net.ssl.TrustManagerFactorySpi;
+import javax.net.ssl.X509TrustManager;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -88,6 +102,86 @@ public class ReferenceCountedOpenSslEngineTest extends OpenSslEngineTest {
             ((ReferenceCountedOpenSslContext) context).sessionContext().setSessionCacheEnabled(true);
         }
         return context;
+    }
+
+    @MethodSource("newTestParams")
+    @ParameterizedTest
+    public void testSniWithPort(SSLEngineTestParam param) throws Exception {
+        if (clientSslContextProvider() != null) {
+            // Not supported when using conscrypt
+            return;
+        }
+        String fqdn = "something.netty.io";
+        SelfSignedCertificate cert = new SelfSignedCertificate(fqdn);
+        clientSslCtx = wrapContext(param, SslContextBuilder
+            .forClient()
+            .trustManager(new TrustManagerFactory(new TrustManagerFactorySpi() {
+                @Override
+                protected void engineInit(KeyStore keyStore) {
+                    // NOOP
+                }
+                @Override
+                protected TrustManager[] engineGetTrustManagers() {
+                    // Provide a custom trust manager, this manager trust all certificates
+                    return new TrustManager[] {
+                        new X509TrustManager() {
+                            @Override
+                            public void checkClientTrusted(
+                                java.security.cert.X509Certificate[] x509Certificates, String s) {
+                                // NOOP
+                            }
+
+                            @Override
+                            public void checkServerTrusted(
+                                java.security.cert.X509Certificate[] x509Certificates, String s) {
+                                // NOOP
+                            }
+
+                            @Override
+                            public java.security.cert.X509Certificate[] getAcceptedIssuers() {
+                                return EmptyArrays.EMPTY_X509_CERTIFICATES;
+                            }
+                        }
+                    };
+                }
+
+                @Override
+                protected void engineInit(ManagerFactoryParameters managerFactoryParameters) {
+                }
+            }, null, TrustManagerFactory.getDefaultAlgorithm()) {
+            })
+            .sslContextProvider(clientSslContextProvider())
+            .sslProvider(sslClientProvider())
+            .build());
+
+        SSLEngine client = wrapEngine(clientSslCtx.newEngine(UnpooledByteBufAllocator.DEFAULT, "127.0.0.1", 1234));
+
+        if (client instanceof OpenSslErrorStackAssertSSLEngine) {
+            OpenSslErrorStackAssertSSLEngine engine = (OpenSslErrorStackAssertSSLEngine) client;
+            engine.setStrictSniNames(false);
+        } else {
+            throw new IllegalStateException("the right class: " + client.getClass().getSimpleName());
+        }
+
+        SSLParameters sslParameters = client.getSSLParameters();
+        sslParameters.setServerNames(Collections.<SNIServerName>singletonList(
+            new SNIHostName((fqdn + ":456").getBytes())));
+        client.setSSLParameters(sslParameters);
+
+        serverSslCtx = wrapContext(param, SslContextBuilder
+            .forServer(cert.certificate(), cert.privateKey())
+            .sslContextProvider(serverSslContextProvider())
+            .sslProvider(sslServerProvider())
+            .build());
+
+        SSLEngine server = wrapEngine(serverSslCtx.newEngine(UnpooledByteBufAllocator.DEFAULT));
+        try {
+            handshake(param.type(), param.delegate(), client, server);
+        } finally {
+            cleanupClientSslEngine(client);
+            cleanupServerSslEngine(server);
+            cert.delete();
+        }
     }
 
     @MethodSource("newTestParams")

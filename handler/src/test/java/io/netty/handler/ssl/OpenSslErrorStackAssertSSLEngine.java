@@ -40,6 +40,10 @@ final class OpenSslErrorStackAssertSSLEngine extends JdkSslEngine implements Ref
         super(engine);
     }
 
+    void setStrictSniNames(boolean strictSniNames) {
+        getWrappedEngine().setStrictSniNames(strictSniNames);
+    }
+
     @Override
     public String getPeerHost() {
         try {

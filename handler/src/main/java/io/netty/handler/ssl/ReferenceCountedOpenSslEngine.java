@@ -97,8 +97,8 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(ReferenceCountedOpenSslEngine.class);
 
     // TODO: the default should be true but this is false now for hacking
-    private static final boolean strictSniNames = SystemPropertyUtil.getBoolean(
-        "io.netty.handler.ssl.strictSniNames", false);
+    private static final boolean DefaultStrictSniNames = SystemPropertyUtil.getBoolean(
+        "io.netty.handler.ssl.strictSniNames", true);
 
     private static final ResourceLeakDetector<ReferenceCountedOpenSslEngine> leakDetector =
             ResourceLeakDetectorFactory.instance().newResourceLeakDetector(ReferenceCountedOpenSslEngine.class);
@@ -162,6 +162,13 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
     private volatile boolean needTask;
     private String[] explicitlyEnabledProtocols;
     private boolean sessionSet;
+
+    private boolean strictSniNames = DefaultStrictSniNames;
+
+    // Allow changing the value for testing purposes
+    void setStrictSniNames(boolean strictSniNames) {
+        this.strictSniNames = strictSniNames;
+    }
 
     // Reference Counting
     private final ResourceLeakTracker<ReferenceCountedOpenSslEngine> leak;

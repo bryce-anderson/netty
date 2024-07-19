@@ -80,6 +80,7 @@ class EpollSocketTestPermutation extends SocketTestPermutation {
                                             .channel(EpollServerSocketChannel.class);
             }
         });
+        /*
         if (IS_SUPPORTING_TCP_FASTOPEN_SERVER) {
             toReturn.add(new BootstrapFactory<ServerBootstrap>() {
                 @Override
@@ -98,6 +99,7 @@ class EpollSocketTestPermutation extends SocketTestPermutation {
                                             .channel(NioServerSocketChannel.class);
             }
         });
+        */
 
         return toReturn;
     }

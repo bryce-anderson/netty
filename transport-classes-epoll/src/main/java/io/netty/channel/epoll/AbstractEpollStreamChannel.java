@@ -535,6 +535,7 @@ public abstract class AbstractEpollStreamChannel extends AbstractEpollChannel im
 
     private void shutdownInput0(final ChannelPromise promise) {
         try {
+            logger.info("shutdownInput0() called.", new Exception());
             socket.shutdown(true, false);
             promise.setSuccess();
         } catch (Throwable cause) {
@@ -586,6 +587,7 @@ public abstract class AbstractEpollStreamChannel extends AbstractEpollChannel im
 
     @Override
     public ChannelFuture shutdownInput(final ChannelPromise promise) {
+        logger.info("{} shutdownInput()", this, new Exception("stack trace"));
         Executor closeExecutor = ((EpollStreamUnsafe) unsafe()).prepareToClose();
         if (closeExecutor != null) {
             closeExecutor.execute(new Runnable() {
@@ -778,6 +780,7 @@ public abstract class AbstractEpollStreamChannel extends AbstractEpollChannel im
                     byteBuf = allocHandle.allocate(allocator);
                     allocHandle.lastBytesRead(doReadBytes(byteBuf));
                     if (allocHandle.lastBytesRead() <= 0) {
+                        logger.info("{} read eof", AbstractEpollStreamChannel.this);
                         // nothing was read, release the buffer.
                         byteBuf.release();
                         byteBuf = null;
@@ -787,6 +790,8 @@ public abstract class AbstractEpollStreamChannel extends AbstractEpollChannel im
                             readPending = false;
                         }
                         break;
+                    } else {
+                        logger.info("{} read some bytes", AbstractEpollStreamChannel.this);
                     }
                     allocHandle.incMessagesRead(1);
                     readPending = false;

@@ -47,7 +47,7 @@ public final class EpollIoOps implements IoOps {
     /**
      * Interested in IO events which should be handled by reading data.
      */
-    public static final EpollIoOps EPOLLRDHUP = new EpollIoOps(Native.EPOLLRDHUP);
+    public static final EpollIoOps EPOLLRDHUP = new EpollIoOps(Native.EPOLLRDHUP); // 16 or 0x10
 
     public static final EpollIoOps EPOLLET = new EpollIoOps(Native.EPOLLET);
 

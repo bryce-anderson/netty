@@ -5,6 +5,6 @@
     CPATH: "/usr/lib/jvm/default-jvm/include/:/usr/lib/jvm/default-jvm/include/linux/"
   },
   build: {
-    dockerfile: "Dockerfile",
+    dockerfile: "Dockerfile"
   }
 }

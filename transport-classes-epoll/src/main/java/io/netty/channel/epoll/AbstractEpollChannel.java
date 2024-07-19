@@ -43,6 +43,8 @@ import io.netty.channel.unix.Socket;
 import io.netty.channel.unix.UnixChannel;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.concurrent.Future;
+import io.netty.util.internal.logging.InternalLogger;
+import io.netty.util.internal.logging.InternalLoggerFactory;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -60,6 +62,8 @@ import static io.netty.channel.unix.UnixChannelUtil.computeRemoteAddr;
 import static io.netty.util.internal.ObjectUtil.checkNotNull;
 
 abstract class AbstractEpollChannel extends AbstractChannel implements UnixChannel {
+
+    private static final InternalLogger logger = InternalLoggerFactory.getInstance(AbstractEpollChannel.class);
     private static final ChannelMetadata METADATA = new ChannelMetadata(false);
     protected final LinuxSocket socket;
     /**
@@ -74,7 +78,6 @@ abstract class AbstractEpollChannel extends AbstractChannel implements UnixChann
 
     private EpollIoRegistration registration;
     boolean inputClosedSeenErrorOnRead;
-    boolean epollInReadyRunnablePending;
     private EpollIoOps ops;
     private EpollIoOps inital;
 
@@ -294,10 +297,6 @@ abstract class AbstractEpollChannel extends AbstractChannel implements UnixChann
 
     @Override
     protected void doRegister(ChannelPromise promise) {
-        // Just in case the previous EventLoop was shutdown abruptly, or an event is still pending on the old EventLoop
-        // make sure the epollInReadyRunnablePending variable is reset so we will be able to execute the Runnable on the
-        // new EventLoop.
-        epollInReadyRunnablePending = false;
         ((IoEventLoop) eventLoop()).register((AbstractEpollUnsafe) unsafe()).addListener(f -> {
             if (f.isSuccess()) {
                 registration = (EpollIoRegistration) f.getNow();
@@ -439,13 +438,6 @@ abstract class AbstractEpollChannel extends AbstractChannel implements UnixChann
     protected abstract class AbstractEpollUnsafe extends AbstractUnsafe implements EpollIoHandle {
         boolean readPending;
         private EpollRecvByteAllocatorHandle allocHandle;
-        private final Runnable epollInReadyRunnable = new Runnable() {
-            @Override
-            public void run() {
-                epollInReadyRunnablePending = false;
-                epollInReady();
-            }
-        };
 
         Channel channel() {
             return AbstractEpollChannel.this;
@@ -484,6 +476,13 @@ abstract class AbstractEpollChannel extends AbstractChannel implements UnixChann
                 epollOutReady();
             }
 
+            if (epollOps.value != 16) {
+                logger.info("{} handling events EPOLLIN: {}, EPOLLOUT: {}, EPOLLERR: {}, EPOLLRDHUP{}, ",
+                        AbstractEpollChannel.this, epollOps.contains(EpollIoOps.EPOLLIN),
+                        epollOps.contains(EpollIoOps.EPOLLOUT), epollOps.contains(EpollIoOps.EPOLLERR),
+                        epollOps.contains(EpollIoOps.EPOLLRDHUP));
+            }
+
             // Check EPOLLIN before EPOLLRDHUP to ensure all data is read before shutting down the input.
             // See https://github.com/netty/netty/issues/4317.
             //
@@ -491,6 +490,9 @@ abstract class AbstractEpollChannel extends AbstractChannel implements UnixChann
             // try to read from the underlying file descriptor and so notify the user about the error.
             if (epollOps.contains(EpollIoOps.EPOLLERR) || epollOps.contains(EpollIoOps.EPOLLIN)) {
                 // The Channel is still open and there is something to read. Do it now.
+                if (epollOps.contains(EpollIoOps.EPOLLERR)) {
+                    logger.info("{} closing due to EPOLLERR", AbstractEpollChannel.this);
+                }
                 epollInReady();
             }
 
@@ -498,6 +500,9 @@ abstract class AbstractEpollChannel extends AbstractChannel implements UnixChann
             // we may close the channel directly or try to read more data depending on the state of the
             // Channel and als depending on the AbstractEpollChannel subtype.
             if (epollOps.contains(EpollIoOps.EPOLLRDHUP)) {
+                // In the test suite we get here and it triggers the right events but that may be because we always
+                // get the EPOLLIN event with the RDHUP event so we first make a pass through `epollInReady()` that
+                // reads -1 bytes and closes things down.
                 epollRdHupReady();
             }
         }
@@ -518,7 +523,8 @@ abstract class AbstractEpollChannel extends AbstractChannel implements UnixChann
         }
 
         /**
-         * Called once EPOLLRDHUP event is ready to be processed
+         * Called once EPOLLRDHUP event is ready to be processed. We may need to drain the input and also make sure
+         * we send the event.
          */
         final void epollRdHupReady() {
             // This must happen before we attempt to read. This will ensure reading continues until an error occurs.
@@ -532,6 +538,11 @@ abstract class AbstractEpollChannel extends AbstractChannel implements UnixChann
             } else {
                 // Just to be safe make sure the input marked as closed.
                 shutdownInput(true);
+            }
+
+            if (!inputClosedSeenErrorOnRead) {
+                inputClosedSeenErrorOnRead = true;
+                pipeline().fireUserEventTriggered(ChannelInputShutdownReadComplete.INSTANCE);
             }
 
             // Clear the EPOLLRDHUP flag to prevent continuously getting woken up on this event.
@@ -561,6 +572,9 @@ abstract class AbstractEpollChannel extends AbstractChannel implements UnixChann
                     } catch (IOException ignored) {
                         // We attempted to shutdown and failed, which means the input has already effectively been
                         // shutdown.
+                        logger.warn("{} Firing ChannelInputShutdownEvent from exception",
+                                AbstractEpollChannel.this, new Exception(ignored));
+                        pipeline().fireUserEventTriggered(ChannelInputShutdownEvent.INSTANCE);
                         fireEventAndClose(ChannelInputShutdownEvent.INSTANCE);
                         return;
                     } catch (NotYetConnectedException ignore) {
@@ -570,11 +584,15 @@ abstract class AbstractEpollChannel extends AbstractChannel implements UnixChann
                     if (shouldStopReading(config())) {
                         clearEpollIn0();
                     }
+                    logger.warn("{} Firing ChannelInputShutdownEvent",
+                            AbstractEpollChannel.this, new Exception("get trace"));
                     pipeline().fireUserEventTriggered(ChannelInputShutdownEvent.INSTANCE);
                 } else {
                     close(voidPromise());
                 }
             } else if (!rdHup && !inputClosedSeenErrorOnRead) {
+                logger.warn("{} Firing ChannelInputShutdownReadComplete",
+                        AbstractEpollChannel.this, new Exception("get trace"));
                 inputClosedSeenErrorOnRead = true;
                 pipeline().fireUserEventTriggered(ChannelInputShutdownReadComplete.INSTANCE);
             }
@@ -626,6 +644,7 @@ abstract class AbstractEpollChannel extends AbstractChannel implements UnixChann
 
         protected final void clearEpollIn0() {
             assert eventLoop().inEventLoop();
+            logger.info("{} Clearing EPOLLIN", AbstractEpollChannel.this);
             try {
                 readPending = false;
                 ops = ops.without(EpollIoOps.EPOLLIN);

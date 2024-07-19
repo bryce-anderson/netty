@@ -61,6 +61,9 @@ public class SocketHalfClosedTest extends AbstractSocketTest {
     @Test
     @Timeout(value = 5000, unit = MILLISECONDS)
     public void testHalfClosureReceiveDataOnFinalWait2StateWhenSoLingerSet(TestInfo testInfo) throws Throwable {
+        if (true) {
+            throw new Exception("Sockets: " + newFactories());
+        }
         run(testInfo, new Runner<ServerBootstrap, Bootstrap>() {
             @Override
             public void run(ServerBootstrap serverBootstrap, Bootstrap bootstrap) throws Throwable {
@@ -361,6 +364,7 @@ public class SocketHalfClosedTest extends AbstractSocketTest {
         AtomicReference<Channel> serverChildChannel = new AtomicReference<>();
         try {
             cb.option(ChannelOption.ALLOW_HALF_CLOSURE, true)
+                    .option(ChannelOption.AUTO_CLOSE, false)
                     .option(ChannelOption.AUTO_READ, false);
 
 //            sb.option(ChannelOption.ALLOW_HALF_CLOSURE, true);

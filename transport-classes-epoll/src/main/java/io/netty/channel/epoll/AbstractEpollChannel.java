@@ -477,7 +477,7 @@ abstract class AbstractEpollChannel extends AbstractChannel implements UnixChann
             }
 
             if (epollOps.value != 16) {
-                logger.info("{} handling events EPOLLIN: {}, EPOLLOUT: {}, EPOLLERR: {}, EPOLLRDHUP{}, ",
+                logger.info("{} handling events EPOLLIN: {}, EPOLLOUT: {}, EPOLLERR: {}, EPOLLRDHUP: {}, ",
                         AbstractEpollChannel.this, epollOps.contains(EpollIoOps.EPOLLIN),
                         epollOps.contains(EpollIoOps.EPOLLOUT), epollOps.contains(EpollIoOps.EPOLLERR),
                         epollOps.contains(EpollIoOps.EPOLLRDHUP));
@@ -539,12 +539,10 @@ abstract class AbstractEpollChannel extends AbstractChannel implements UnixChann
                 // Just to be safe make sure the input marked as closed.
                 shutdownInput(true);
             }
-
-            if (!inputClosedSeenErrorOnRead) {
-                inputClosedSeenErrorOnRead = true;
-                pipeline().fireUserEventTriggered(ChannelInputShutdownReadComplete.INSTANCE);
-            }
-
+            // Socket should be drained and input shutdown at this point.
+            assert socket.isInputShutdown();
+            assert allocHandle.lastBytesRead() < 0;
+            finishInputShutdown();
             // Clear the EPOLLRDHUP flag to prevent continuously getting woken up on this event.
             clearEpollRdHup();
         }
@@ -590,7 +588,13 @@ abstract class AbstractEpollChannel extends AbstractChannel implements UnixChann
                 } else {
                     close(voidPromise());
                 }
-            } else if (!rdHup && !inputClosedSeenErrorOnRead) {
+            } else if (!rdHup) {
+                finishInputShutdown();
+            }
+        }
+
+        private void finishInputShutdown() {
+            if (!inputClosedSeenErrorOnRead) {
                 logger.warn("{} Firing ChannelInputShutdownReadComplete",
                         AbstractEpollChannel.this, new Exception("get trace"));
                 inputClosedSeenErrorOnRead = true;

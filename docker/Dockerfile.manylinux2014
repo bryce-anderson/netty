@@ -1,0 +1,88 @@
+# manylinux2014 (CentOS 7, glibc 2.17) with a maintained GCC 10 toolchain, for
+# the codec-native-quic native build. Same 2.17 glibc floor as Dockerfile.centos7
+# but the image is maintained upstream, so none of the centos-vault URL rewrites,
+# expired-CA workarounds, or from-source OpenSSL builds are needed. cmake,
+# patchelf, git, perl and python already ship in the base image.
+#
+# Arch-generic: pass the matching per-arch base image and build with the matching
+# --platform. Only Go and the JDK need arch-specific downloads; those are derived
+# from `uname -m` at build time. manylinux2014 has no riscv64 image (and riscv64
+# postdates glibc 2.17), so riscv64 is not built here.
+#
+#   x86_64:  --build-arg BASE_IMAGE=quay.io/pypa/manylinux2014_x86_64  --platform linux/amd64
+#   aarch64: --build-arg BASE_IMAGE=quay.io/pypa/manylinux2014_aarch64 --platform linux/arm64
+ARG BASE_IMAGE=quay.io/pypa/manylinux2014_x86_64
+FROM ${BASE_IMAGE}
+
+ARG go_version=1.22.5
+ARG jdk_version=11.0.24+8
+ARG clang_version=v20.1.8.0
+ENV SOURCE_DIR=/root/source
+RUN mkdir $SOURCE_DIR
+WORKDIR $SOURCE_DIR
+
+# Native dependencies for the non-QUIC native modules so this image can replace
+# Dockerfile.centos7 for the whole native build, not just codec-native-quic:
+#   apr-devel            -> transport-native-unix-common
+#   lksctp-tools-devel   -> SCTP
+#   libaio-devel         -> transport-native-io_uring
+#   autoconf/automake/libtool -> the transports' autotools build
+# These resolve from manylinux2014's maintained base repo (verified: no CentOS-7
+# vault plumbing needed, unlike Dockerfile.centos7).
+RUN yum install -y \
+      apr-devel \
+      autoconf \
+      automake \
+      libaio-devel \
+      libtool \
+      lksctp-tools-devel \
+      zlib-devel \
+ && yum clean all
+
+# Go and Ninja are BoringSSL build-time requirements (err_data generation and
+# the `-GNinja` generator). Ninja's GitHub release has no aarch64 asset for older
+# tags, so use the arch-agnostic ninja wheel via the image's pipx. cmake and
+# patchelf are already provided by manylinux.
+RUN set -eux; \
+    case "$(uname -m)" in \
+      x86_64)  goarch=amd64 ;; \
+      aarch64) goarch=arm64 ;; \
+      *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;; \
+    esac; \
+    curl -sSL "https://go.dev/dl/go${go_version}.linux-${goarch}.tar.gz" -o go.tar.gz; \
+    tar -C /opt -xzf go.tar.gz; rm go.tar.gz
+ENV PATH="/opt/go/bin:${PATH}"
+
+RUN pipx install ninja
+ENV PATH="/root/.local/bin:${PATH}"
+
+# Rust + cargo for quiche. boring-sys runs bindgen, which dlopens libclang.so at
+# runtime; see LIBCLANG_PATH below.
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# JDK to run the build. The repo ships ./mvnw, so no separate Maven install.
+RUN set -eux; \
+    case "$(uname -m)" in \
+      x86_64)  jdkarch=x64 ;; \
+      aarch64) jdkarch=aarch64 ;; \
+      *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;; \
+    esac; \
+    ver="${jdk_version%+*}"; build="${jdk_version#*+}"; \
+    url="https://github.com/adoptium/temurin11-binaries/releases/download/jdk-${ver}%2B${build}/OpenJDK11U-jdk_${jdkarch}_linux_hotspot_${ver}_${build}.tar.gz"; \
+    curl -sSL "$url" -o jdk.tar.gz; \
+    mkdir -p /opt/jdk; tar -C /opt/jdk --strip-components=1 -xzf jdk.tar.gz; rm jdk.tar.gz
+ENV JAVA_HOME=/opt/jdk
+ENV PATH="$JAVA_HOME/bin:${PATH}"
+
+# bindgen needs libclang.so, which the base image does not ship and
+# manylinux-install-clang does not provide (its clang driver is static, with no
+# libclang.so). Install the libclang pip wheel for the .so, and the static clang
+# toolchain solely for its resource-dir builtin headers (stddef.h etc.) — without
+# them bindgen fails parsing BoringSSL's base.h. Bake both paths into the login
+# environment at build time.
+RUN /opt/python/cp312-cp312/bin/pip install --no-cache-dir libclang && \
+    echo "export LIBCLANG_PATH=$(dirname "$(find /opt/_internal -name libclang.so | head -1)")" > /etc/profile.d/libclang.sh && \
+    manylinux-install-clang -v "$clang_version" && \
+    echo "export BINDGEN_EXTRA_CLANG_ARGS=\"-isystem $(ls -d /opt/clang/lib/clang/*/include | head -1)\"" >> /etc/profile.d/libclang.sh && \
+    cat /etc/profile.d/libclang.sh

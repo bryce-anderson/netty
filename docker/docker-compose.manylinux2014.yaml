@@ -1,0 +1,44 @@
+# PoC: build the native modules in the manylinux2014 image (glibc 2.17 floor,
+# maintained GCC 10) instead of Dockerfile.centos7. Self-contained — does not
+# layer on docker-compose.yaml (which is centos7/sdkman-specific). Driven by
+# .github/workflows/ci-manylinux2014.yml.
+version: "3"
+
+services:
+
+  runtime-setup:
+    image: netty-manylinux2014:default
+    build:
+      context: .
+      dockerfile: Dockerfile.manylinux2014
+      args:
+        # x86_64 for GitHub-hosted runners (built natively, no emulation).
+        BASE_IMAGE: quay.io/pypa/manylinux2014_x86_64
+
+  common: &common
+    image: netty-manylinux2014:default
+    depends_on: [runtime-setup]
+    environment:
+      - MAVEN_OPTS
+    volumes:
+      - ~/.m2:/root/.m2
+      - ..:/code
+    working_dir: /code
+    # `bash -cl` sources /etc/profile.d/libclang.sh (LIBCLANG_PATH /
+    # BINDGEN_EXTRA_CLANG_ARGS baked in at image build time), which the quiche
+    # bindgen step needs.
+
+  # Headline demo: the hard native path — BoringSSL + quiche/Rust + JNI — built
+  # at a glibc 2.17 floor.
+  build-native-quic:
+    <<: *common
+    command: /bin/bash -cl "./mvnw -B -ntp -pl codec-native-quic -am clean install -DskipTests=true -Drevapi.skip=true -Dcheckstyle.skip=true -Dforbiddenapis.skip=true"
+
+  # Full reactor, to show manylinux2014 can replace centos7 wholesale.
+  build:
+    <<: *common
+    command: /bin/bash -cl "./mvnw -B -ntp clean install -DskipTests=true -Drevapi.skip=true -Dcheckstyle.skip=true -Dforbiddenapis.skip=true"
+
+  shell:
+    <<: *common
+    entrypoint: /bin/bash
